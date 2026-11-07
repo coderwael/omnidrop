@@ -185,13 +185,11 @@ jobs:
         run: |
           cd desktop_app
           mkdir -p _backup
-          cp lib/main.dart _backup/main_backup.dart
+          cp -r lib/* _backup/
           flutter config --enable-windows-desktop
           flutter create --platforms=windows .
-          cp _backup/main_backup.dart lib/main.dart
+          cp -r _backup/* lib/
           rm -rf _backup
-          # Copy shared FFI bridge so relative import resolves cleanly
-          mkdir -p ../mobile_app/lib
           flutter pub get
           flutter build windows --release
 
