@@ -1,0 +1,40 @@
+# Rust
+target/
+**/target/
+**/*.rs.bk
+
+# Python
+**/__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+**/build/
+
+# Android
+.gradle/
+**/android/.gradle/
+local.properties
+**/key.properties
+*.keystore
+*.jks
+!debug.keystore
+
+# Release archives
+*.apk
+*.aab
+*.zip
+*.tar.gz
+
+# IDE / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

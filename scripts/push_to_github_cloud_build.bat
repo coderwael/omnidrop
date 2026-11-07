@@ -1,15 +1,20 @@
 @echo off
 REM One-command Windows batch script to push OmniDrop to GitHub and trigger cloud builds.
-IF "%~1"=="" (
+cd /d "%~dp0.."
+
+SET REMOTE_URL=%~1
+IF "%REMOTE_URL%"=="" (
+    FOR /F "delims=" %%i IN ('git config --get remote.origin.url 2^>NUL') DO SET REMOTE_URL=%%i
+)
+IF "%REMOTE_URL%"=="" (
+    echo [ERROR] No remote URL provided and no origin configured.
     echo Usage: push_to_github_cloud_build.bat https://github.com/YOUR_USERNAME/omnidrop.git [v1.0.0]
+    pause
     exit /b 1
 )
 
-SET REMOTE_URL=%~1
 SET RELEASE_TAG=%~2
 IF "%RELEASE_TAG%"=="" SET RELEASE_TAG=v1.0.0
-
-cd /d "%~dp0.."
 
 IF NOT EXIST ".git" (
     git init
@@ -17,7 +22,7 @@ IF NOT EXIST ".git" (
 )
 
 git add -A
-git commit -m "OmniDrop Full-Stack Workspace + Cloud Release Workflow"
+git commit -m "fix: resolve Rust syntax/types and add Unicode filename & Range support"
 git remote remove origin 2>NUL
 git remote add origin %REMOTE_URL%
 git tag -f %RELEASE_TAG%

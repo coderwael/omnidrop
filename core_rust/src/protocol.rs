@@ -46,7 +46,7 @@ pub mod flags {
 
 #[derive(Debug, Error)]
 pub enum ProtocolError {
-    #[error("Invalid magic bytes: expected 0x{ MAGIC_BYTES:08X}, got 0x{0:08X}")]
+    #[error("Invalid magic bytes: expected 0x4F4D4E49, got 0x{0:08X}")]
     InvalidMagic(u32),
     #[error("Unsupported protocol version: {0}")]
     UnsupportedVersion(u8),
@@ -54,7 +54,7 @@ pub enum ProtocolError {
     UnknownPacketType(u8),
     #[error("Header CRC16 mismatch: expected 0x{expected:04X}, computed 0x{actual:04X}")]
     HeaderCrcMismatch { expected: u16, actual: u16 },
-    #[error("Payload length {0} exceeds maximum allowed frame size {MAX_FRAME_PAYLOAD}")]
+    #[error("Payload length {0} exceeds maximum allowed frame size")]
     PayloadTooLarge(u32),
     #[error("Insufficient buffer bytes: required {required}, available {available}")]
     IncompleteFrame { required: usize, available: usize },

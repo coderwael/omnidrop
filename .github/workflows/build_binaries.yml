@@ -86,14 +86,15 @@ jobs:
         run: |
           cd mobile_app
           # Backup our custom AndroidManifest.xml, Kotlin BLE/Overlay services, and jniLibs
-          mkdir -p /tmp/omnidrop_android_backup
-          cp -r android/app/src/main/* /tmp/omnidrop_android_backup/
+          mkdir -p _backup
+          cp -r android/app/src/main/* _backup/
 
           # Generate any missing standard Gradle wrapper / res files
           flutter create --platforms=android --org com.omnidrop .
 
           # Restore our production Manifest, Kotlin services, and compiled Rust .so libraries
-          cp -r /tmp/omnidrop_android_backup/* android/app/src/main/
+          cp -r _backup/* android/app/src/main/
+          rm -rf _backup
 
       - name: Generate Production Signing Keystore (or Decode Secret Keystore)
         run: |
@@ -183,10 +184,12 @@ jobs:
         shell: bash
         run: |
           cd desktop_app
-          cp lib/main.dart /tmp/desktop_main_backup.dart
+          mkdir -p _backup
+          cp lib/main.dart _backup/main_backup.dart
           flutter config --enable-windows-desktop
           flutter create --platforms=windows .
-          cp /tmp/desktop_main_backup.dart lib/main.dart
+          cp _backup/main_backup.dart lib/main.dart
+          rm -rf _backup
           # Copy shared FFI bridge so relative import resolves cleanly
           mkdir -p ../mobile_app/lib
           flutter pub get

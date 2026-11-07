@@ -3,16 +3,15 @@
 # and trigger the automated cloud binary build & release workflow.
 set -euo pipefail
 
-if [ $# -lt 1 ]; then
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+REMOTE_URL="${1:-$(git config --get remote.origin.url || true)}"
+if [ -z "$REMOTE_URL" ]; then
   echo "Usage: ./push_to_github_cloud_build.sh <https://github.com/YOUR_USERNAME/omnidrop.git> [v1.0.0]"
   exit 1
 fi
-
-REMOTE_URL="$1"
 RELEASE_TAG="${2:-v1.0.0}"
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-cd "$ROOT_DIR"
 
 if [ ! -d ".git" ]; then
   git init

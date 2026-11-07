@@ -1,58 +1,258 @@
-name: OmniDrop Multi-Platform Release CI
+name: OmniDrop Cloud Binary Builder & Release Pipeline
 
 on:
   push:
+    branches:
+      - main
+      - master
     tags:
       - 'v*.*.*'
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional Git tag for publishing a GitHub Release (e.g., v1.0.0)'
+        required: false
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+env:
+  FLUTTER_VERSION: '3.22.2'
+  RUST_BACKTRACE: 1
 
 jobs:
-  build-android:
+  # ============================================================================
+  # JOB 1: ANDROID FFI CROSS-COMPILATION + SIGNED SPLIT-PER-ABI APK ASSEMBLY
+  # ============================================================================
+  build-android-apk:
+    name: Build Android Signed Release APK (arm64 / v7a / x86_64)
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout OmniDrop Workspace
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17 (Required by Gradle 8 & Android SDK)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Android SDK & NDK r26d
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-34 build-tools;34.0.0 ndk;26.3.11579264'
+
+      - name: Export ANDROID_NDK_HOME
+        run: |
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/26.3.11579264" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=${ANDROID_HOME}/ndk/26.3.11579264" >> $GITHUB_ENV
+
+      - name: Install Rust Stable Toolchain & Android Targets
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
-      - name: Install cargo-ndk
-        run: cargo install cargo-ndk
-      - uses: subosito/flutter-action@v2
+
+      - name: Cache Cargo Registry & Target Builds
+        uses: Swatinem/rust-cache@v2
         with:
-          flutter-version: '3.22.0'
-          channel: 'stable'
-      - name: Compile Rust Core & Build Split APKs
+          workspaces: 'core_rust -> target'
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Compile librust_omnidrop.so for All Android ABIs
         run: |
+          mkdir -p mobile_app/android/app/src/main/jniLibs
           cd core_rust
-          cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o ../mobile_app/android/app/src/main/jniLibs build --release
-          cd ../mobile_app
+          cargo ndk \
+            -t arm64-v8a \
+            -t armeabi-v7a \
+            -t x86_64 \
+            -o ../mobile_app/android/app/src/main/jniLibs \
+            build --release
+          ls -lhR ../mobile_app/android/app/src/main/jniLibs
+
+      - name: Set up Flutter SDK (${{ env.FLUTTER_VERSION }})
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: 'stable'
+          cache: true
+
+      - name: Bootstrap Flutter Android Runner & Preserve Custom Kotlin/Manifest Files
+        run: |
+          cd mobile_app
+          # Backup our custom AndroidManifest.xml, Kotlin BLE/Overlay services, and jniLibs
+          mkdir -p _backup
+          cp -r android/app/src/main/* _backup/
+
+          # Generate any missing standard Gradle wrapper / res files
+          flutter create --platforms=android --org com.omnidrop .
+
+          # Restore our production Manifest, Kotlin services, and compiled Rust .so libraries
+          cp -r _backup/* android/app/src/main/
+          rm -rf _backup
+
+      - name: Generate Production Signing Keystore (or Decode Secret Keystore)
+        run: |
+          cd mobile_app/android/app
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > omnidrop-release.jks
+            STORE_PASS="${{ secrets.ANDROID_KEYSTORE_PASSWORD }}"
+            KEY_ALIAS="${{ secrets.ANDROID_KEY_ALIAS }}"
+            KEY_PASS="${{ secrets.ANDROID_KEY_PASSWORD }}"
+          else
+            echo "Generating automated self-signed release keystore for instant cloud build..."
+            STORE_PASS="omnidrop_release_pass"
+            KEY_ALIAS="omnidrop_key"
+            KEY_PASS="omnidrop_release_pass"
+            keytool -genkeypair -v \
+              -keystore omnidrop-release.jks \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -alias "$KEY_ALIAS" \
+              -storepass "$STORE_PASS" \
+              -keypass "$KEY_PASS" \
+              -dname "CN=OmniDrop Engineering, OU=Systems, O=OmniDrop, L=Cairo, S=EG, C=EG"
+          fi
+
+          cat <<EOF > ../key.properties
+          storePassword=$STORE_PASS
+          keyPassword=$KEY_PASS
+          keyAlias=$KEY_ALIAS
+          storeFile=omnidrop-release.jks
+          EOF
+
+      - name: Build Signed Split-per-ABI Release APKs
+        run: |
+          cd mobile_app
           flutter pub get
           flutter build apk --release --split-per-abi
-      - uses: actions/upload-artifact@v4
-        with:
-          name: omnidrop-android-apks
-          path: mobile_app/build/app/outputs/flutter-apk/*.apk
+          cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk ../OmniDrop-Android-arm64.apk
+          cp build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk ../OmniDrop-Android-armeabi-v7a.apk
+          cp build/app/outputs/flutter-apk/app-x86_64-release.apk ../OmniDrop-Android-x86_64.apk
 
-  build-windows:
+      - name: Upload Android Release APKs Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OmniDrop-Android-Release-APKs
+          path: |
+            OmniDrop-Android-arm64.apk
+            OmniDrop-Android-armeabi-v7a.apk
+            OmniDrop-Android-x86_64.apk
+          retention-days: 30
+
+  # ============================================================================
+  # JOB 2: WINDOWS MSVC RUST DLL + FLUTTER WINDOWS PORTABLE ZIP BUNDLE
+  # ============================================================================
+  build-windows-exe:
+    name: Build Windows x64 Native Executable & DLL Bundle
     runs-on: windows-2022
+    timeout-minutes: 45
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout OmniDrop Workspace
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain (x86_64-pc-windows-msvc)
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
-      - uses: subosito/flutter-action@v2
+
+      - name: Cache Cargo Registry & Target Builds
+        uses: Swatinem/rust-cache@v2
         with:
-          flutter-version: '3.22.0'
-          channel: 'stable'
-      - name: Compile Rust DLL & Build Windows Desktop Client
+          workspaces: 'core_rust -> target'
+
+      - name: Compile rust_omnidrop.dll (MSVC Release)
         shell: bash
         run: |
           cd core_rust
           cargo build --release --target x86_64-pc-windows-msvc
-          cd ../desktop_app
+          ls -lh target/x86_64-pc-windows-msvc/release/rust_omnidrop.dll
+
+      - name: Set up Flutter SDK (${{ env.FLUTTER_VERSION }})
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: 'stable'
+          cache: true
+
+      - name: Bootstrap Windows C++ Runner & Build Release Executable
+        shell: bash
+        run: |
+          cd desktop_app
+          mkdir -p _backup
+          cp lib/main.dart _backup/main_backup.dart
+          flutter config --enable-windows-desktop
+          flutter create --platforms=windows .
+          cp _backup/main_backup.dart lib/main.dart
+          rm -rf _backup
+          # Copy shared FFI bridge so relative import resolves cleanly
+          mkdir -p ../mobile_app/lib
           flutter pub get
           flutter build windows --release
-          cp ../core_rust/target/x86_64-pc-windows-msvc/release/rust_omnidrop.dll build/windows/x64/runner/Release/
-      - uses: actions/upload-artifact@v4
+
+          # Copy compiled Rust core DLL and zero-toolchain standalone fallback alongside the .exe
+          cp ../core_rust/target/x86_64-pc-windows-msvc/release/rust_omnidrop.dll \
+             build/windows/x64/runner/Release/
+          cp ../standalone_instant_run/omnidrop_instant_node.py \
+             build/windows/x64/runner/Release/
+          cp ../standalone_instant_run/Run-OmniDrop-Windows.bat \
+             build/windows/x64/runner/Release/
+
+      - name: Package Portable Windows Release Archive (OmniDrop-Windows-x64.zip)
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "desktop_app/build/windows/x64/runner/Release/*" `
+            -DestinationPath "OmniDrop-Windows-x64.zip" -Force
+
+      - name: Upload Windows Portable Release Artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: omnidrop-windows-x64-portable
-          path: desktop_app/build/windows/x64/runner/Release/
+          name: OmniDrop-Windows-x64
+          path: OmniDrop-Windows-x64.zip
+          retention-days: 30
+
+  # ============================================================================
+  # JOB 3: PUBLISH GITHUB RELEASE ASSETS (WHEN TAGGED OR MANUALLY TRIGGERED)
+  # ============================================================================
+  publish-release:
+    name: Publish GitHub Release Binaries
+    needs: [build-android-apk, build-windows-exe]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Download Compiled Android APKs
+        uses: actions/download-artifact@v4
+        with:
+          name: OmniDrop-Android-Release-APKs
+          path: ./release_assets
+
+      - name: Download Compiled Windows x64 Archive
+        uses: actions/download-artifact@v4
+        with:
+          name: OmniDrop-Windows-x64
+          path: ./release_assets
+
+      - name: Create GitHub Release & Attach Binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name != 'main' && github.ref_name != 'master' && github.ref_name || inputs.release_tag || 'v1.0.0' }}
+          name: "OmniDrop Production Release (${{ inputs.release_tag || github.ref_name }})"
+          body: |
+            ## OmniDrop Production Multi-Channel P2P Release
+            - **OmniDrop-Android-arm64.apk**: Native Flutter + Rust FFI (`librust_omnidrop.so`) Android client with BLE discovery, Share Sheet target, and Floating Drop Bubble.
+            - **OmniDrop-Windows-x64.zip**: Portable Windows Desktop client (`omnidrop_desktop.exe` + `rust_omnidrop.dll` + Zero-Toolchain Instant Fallback).
+          files: |
+            release_assets/OmniDrop-Android-arm64.apk
+            release_assets/OmniDrop-Android-armeabi-v7a.apk
+            release_assets/OmniDrop-Android-x86_64.apk
+            release_assets/OmniDrop-Windows-x64.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

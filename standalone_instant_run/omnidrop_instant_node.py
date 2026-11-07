@@ -29,6 +29,7 @@ import os
 from pathlib import Path
 import platform
 import queue
+import re
 import socket
 import socketserver
 import struct
@@ -69,6 +70,26 @@ def get_local_lan_ips():
     return ips or ["127.0.0.1"]
 
 
+def make_content_disposition(filename: str, disposition: str = "attachment") -> str:
+    """Formats Content-Disposition header conforming to RFC 6266 and RFC 5987.
+    
+    Provides an ASCII-safe fallback for filename (preventing Latin-1 encoding errors in
+    http.server.BaseHTTPRequestHandler) alongside filename*=UTF-8''... containing the full
+    Unicode / UTF-8 encoded name for modern browsers.
+    """
+    raw_name = Path(filename).name or "download.bin"
+    encoded_utf8 = urllib.parse.quote(raw_name, encoding="utf-8")
+    
+    stem = Path(raw_name).stem
+    suffix = Path(raw_name).suffix
+    ascii_stem = "".join(c if (c.isalnum() or c in "._- ") and ord(c) < 128 else "_" for c in stem).strip("._ ")
+    if not ascii_stem:
+        ascii_stem = "file"
+    ascii_fallback = f"{ascii_stem}{suffix}".replace('"', '_')
+    
+    return f"{disposition}; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded_utf8}"
+
+
 def compute_dynamic_chunk_size(file_size: int) -> int:
     if file_size <= 64 * 1024 * 1024:
         return MIN_CHUNK_BYTES
@@ -92,7 +113,9 @@ class DeduplicatingSparseAssembler:
         self.started_at = time.time()
 
         receive_dir.mkdir(parents=True, exist_ok=True)
-        safe_name = Path(filename).name or f"payload_{file_id}.bin"
+        raw_name = Path(filename).name or f"payload_{file_id}.bin"
+        clean_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', raw_name).strip(' .')
+        safe_name = clean_name or f"payload_{file_id}.bin"
         target = receive_dir / safe_name
         if target.exists():
             stem = target.stem
@@ -343,6 +366,15 @@ const progFill = document.getElementById('progFill');
 const outgoingList = document.getElementById('outgoingList');
 const connBadge = document.getElementById('connBadge');
 
+function escapeHtml(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function renderOutgoingFiles(files) {
   if (!files || !files.length) {
     outgoingList.innerHTML = '<div style="color:var(--muted);font-size:13px;">No files staged yet. Drag files onto the Desktop window!</div>';
@@ -351,10 +383,10 @@ function renderOutgoingFiles(files) {
   outgoingList.innerHTML = files.map(f => `
     <div class="file-row">
       <div>
-        <div style="font-weight:600;font-size:14px;">${f.name}</div>
+        <div style="font-weight:600;font-size:14px;">${escapeHtml(f.name)}</div>
         <div style="font-size:11px;color:var(--muted);">${(f.size / 1048576).toFixed(2)} MiB • ${f.total_chunks} Chunks</div>
       </div>
-      <a class="btn" href="/api/download?file_id=${encodeURIComponent(f.file_id)}" download="${f.name}">Download</a>
+      <a class="btn" href="/api/download?file_id=${encodeURIComponent(f.file_id)}" download="${escapeHtml(f.name)}">Download</a>
     </div>
   `).join('');
 }
@@ -498,6 +530,13 @@ def make_http_handler(hub: OmniDropStateHub):
         def log_message(self, format, *args):
             pass  # Keep console clean
 
+        def do_HEAD(self):
+            self._is_head = True
+            try:
+                self.do_GET()
+            finally:
+                self._is_head = False
+
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path == "/ws" and self.headers.get("Upgrade", "").lower() == "websocket":
@@ -510,7 +549,8 @@ def make_http_handler(hub: OmniDropStateHub):
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
-                self.wfile.write(body)
+                if not getattr(self, "_is_head", False):
+                    self.wfile.write(body)
                 return
 
             if parsed.path == "/manifest.json":
@@ -519,7 +559,8 @@ def make_http_handler(hub: OmniDropStateHub):
                 self.send_header("Content-Type", "application/manifest+json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
-                self.wfile.write(body)
+                if not getattr(self, "_is_head", False):
+                    self.wfile.write(body)
                 return
 
             if parsed.path == "/api/status":
@@ -536,7 +577,8 @@ def make_http_handler(hub: OmniDropStateHub):
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
-                self.wfile.write(payload)
+                if not getattr(self, "_is_head", False):
+                    self.wfile.write(payload)
                 return
 
             if parsed.path == "/api/download":
@@ -549,22 +591,63 @@ def make_http_handler(hub: OmniDropStateHub):
 
                 file_path = info["path"]
                 file_size = info["size"]
-                self.send_response(200)
+                start = 0
+                end = max(0, file_size - 1)
+                status_code = 200
+
+                # Support RFC 7233 Range requests for download resumption & scrubbing
+                range_hdr = self.headers.get("Range")
+                if range_hdr and range_hdr.startswith("bytes=") and file_size > 0:
+                    try:
+                        spec = range_hdr.split("=", 1)[1].strip()
+                        parts = spec.split("-", 1)
+                        if parts[0]:
+                            start = int(parts[0])
+                            if parts[1]:
+                                end = int(parts[1])
+                        elif parts[1]:
+                            suffix_len = int(parts[1])
+                            start = max(0, file_size - suffix_len)
+                            end = file_size - 1
+
+                        if 0 <= start <= end and start < file_size:
+                            end = min(end, file_size - 1)
+                            status_code = 206
+                        else:
+                            self.send_response(416, "Range Not Satisfiable")
+                            self.send_header("Content-Range", f"bytes */{file_size}")
+                            self.end_headers()
+                            return
+                    except Exception:
+                        status_code = 200
+                        start = 0
+                        end = max(0, file_size - 1)
+
+                content_len = (end - start + 1) if file_size > 0 else 0
+
+                self.send_response(status_code)
                 self.send_header("Content-Type", "application/octet-stream")
-                self.send_header("Content-Disposition", f'attachment; filename="{info["name"]}"')
-                self.send_header("Content-Length", str(file_size))
+                self.send_header("Content-Disposition", make_content_disposition(info["name"]))
+                self.send_header("Accept-Ranges", "bytes")
+                if status_code == 206:
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+                self.send_header("Content-Length", str(content_len))
                 self.end_headers()
 
-                # Zero-copy memory-mapped streaming where non-empty
-                with open(file_path, "rb") as f:
-                    if file_size > 0:
-                        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-                            offset = 0
-                            step = 4 * 1024 * 1024
-                            while offset < file_size:
-                                end = min(file_size, offset + step)
-                                self.wfile.write(mm[offset:end])
-                                offset = end
+                if file_size > 0 and content_len > 0 and not getattr(self, "_is_head", False):
+                    try:
+                        with open(file_path, "rb") as f:
+                            f.seek(start)
+                            remaining = content_len
+                            buf_size = 1024 * 1024  # 1 MiB stream buffer
+                            while remaining > 0:
+                                chunk = f.read(min(remaining, buf_size))
+                                if not chunk:
+                                    break
+                                self.wfile.write(chunk)
+                                remaining -= len(chunk)
+                    except (ConnectionResetError, BrokenPipeError):
+                        pass
                 return
 
             self.send_error(404, "Not Found")
@@ -688,11 +771,10 @@ def start_udp_lan_beacon(hub: OmniDropStateHub):
     t.start()
 
 
-def enable_win32_native_drag_drop(tk_root, on_files_dropped):
-    """
-    Hooks native Windows `WM_DROPFILES` (0x0233) via `ctypes.windll.shell32.DragAcceptFiles`
+def enable_win32_native_drag_drop(root, on_files_dropped):
+    """Hooks native Windows WM_DROPFILES (0x0233) via ctypes.windll.shell32.DragAcceptFiles
     so users can drag files directly from Windows Explorer onto the Tkinter window with
-    zero external Python packages.
+    zero external Python packages. 64-bit and 32-bit safe.
     """
     if sys.platform != "win32":
         return
@@ -702,39 +784,54 @@ def enable_win32_native_drag_drop(tk_root, on_files_dropped):
         shell32 = ctypes.windll.shell32
 
         WM_DROPFILES = 0x0233
-        GWL_WNDPROC = -4
+        GWLP_WNDPROC = -4
 
-        hwnd = tk_root.winfo_id()
+        is_64bit = ctypes.sizeof(ctypes.c_void_p) == 8
+        LRESULT = ctypes.c_int64 if is_64bit else ctypes.c_long
+        WPARAM = ctypes.c_uint64 if is_64bit else ctypes.c_uint
+        LPARAM = ctypes.c_int64 if is_64bit else ctypes.c_long
+
+        SetWindowLongPtrW = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+        SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+        SetWindowLongPtrW.restype = ctypes.c_void_p
+
+        CallWindowProcW = user32.CallWindowProcW
+        CallWindowProcW.argtypes = [ctypes.c_void_p, wintypes.HWND, wintypes.UINT, WPARAM, LPARAM]
+        CallWindowProcW.restype = LRESULT
+
+        WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, WPARAM, LPARAM)
+
+        root.update_idletasks()
+        raw_hwnd = root.winfo_id()
+        hwnd = user32.GetParent(raw_hwnd) or raw_hwnd
+
         shell32.DragAcceptFiles(hwnd, True)
 
-        WNDPROCTYPE = ctypes.WINFUNCTYPE(
-            ctypes.c_long, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
-        )
-
-        SetWindowLongPtr = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
-        CallWindowProc = user32.CallWindowProcW
-
-        old_wndproc = SetWindowLongPtr(hwnd, GWL_WNDPROC, 0)
+        old_wndproc = None
 
         def py_wndproc(h_wnd, msg, w_param, l_param):
             if msg == WM_DROPFILES:
-                count = shell32.DragQueryFileW(w_param, 0xFFFFFFFF, None, 0)
-                dropped = []
-                for idx in range(count):
-                    length = shell32.DragQueryFileW(w_param, idx, None, 0) + 1
-                    buf = ctypes.create_unicode_buffer(length)
-                    shell32.DragQueryFileW(w_param, idx, buf, length)
-                    dropped.append(buf.value)
-                shell32.DragFinish(w_param)
-                if dropped:
-                    tk_root.after(10, lambda: on_files_dropped(dropped))
+                try:
+                    count = shell32.DragQueryFileW(w_param, 0xFFFFFFFF, None, 0)
+                    dropped = []
+                    for idx in range(count):
+                        length = shell32.DragQueryFileW(w_param, idx, None, 0) + 1
+                        buf = ctypes.create_unicode_buffer(length)
+                        shell32.DragQueryFileW(w_param, idx, buf, length)
+                        if buf.value:
+                            dropped.append(buf.value)
+                    shell32.DragFinish(w_param)
+                    if dropped:
+                        root.after(10, lambda: on_files_dropped(dropped))
+                except Exception:
+                    pass
                 return 0
-            return CallWindowProc(old_wndproc, h_wnd, msg, w_param, l_param)
+            return CallWindowProcW(old_wndproc, h_wnd, msg, w_param, l_param)
 
-        new_proc = WNDPROCTYPE(py_wndproc)
-        # Keep reference attached to root so GC never collects the callback
-        tk_root._win32_wndproc_ref = new_proc
-        old_wndproc = SetWindowLongPtr(hwnd, GWL_WNDPROC, new_proc)
+        new_proc = WNDPROC(py_wndproc)
+        root._win32_wndproc_ref = new_proc
+        old_wndproc = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, ctypes.cast(new_proc, ctypes.c_void_p).value)
+        root._win32_old_wndproc = old_wndproc
     except Exception:
         pass
 

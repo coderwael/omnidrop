@@ -10,7 +10,7 @@ use crate::transport::{MultipathReceiverServer, MultipathTransferEngine, Transfe
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int, c_ ushort};
+use std::os::raw::{c_char, c_int};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -22,6 +22,7 @@ pub struct OmniDropCoreContext {
     progress_rx: flume::Receiver<TransferProgressEvent>,
     latest_event: Arc<Mutex<Option<TransferProgressEvent>>>,
     mdns: Option<MdnsDiscoveryManager>,
+    #[allow(dead_code)]
     crypto: Arc<CryptoHandshakeEngine>,
     shutdown_flag: Arc<AtomicBool>,
 }

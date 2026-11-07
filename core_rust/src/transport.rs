@@ -58,7 +58,7 @@ pub struct TransferProgressEvent {
 }
 
 #[derive(Debug)]
-structChunkJob {
+struct ChunkJob {
     file_id: String,
     chunk_index: u32,
     attempt: u32,
@@ -115,7 +115,7 @@ impl MultipathMetrics {
 }
 
 /// Builds a self-signed TLS 1.3 configuration for QUIC (`quinn`) peer-to-peer streams.
-pub fn build_quic_Configs() -> Result<(quinn::ServerConfig, quinn::ClientConfig), TransportError> {
+pub fn build_quic_configs() -> Result<(quinn::ServerConfig, quinn::ClientConfig), TransportError> {
     let cert = rcgen::generate_simple_self_signed(vec!["omnidrop.local".into()])
         .map_err(|e| TransportError::QuicConnect(e.to_string()))?;
     let cert_der = cert
@@ -237,10 +237,10 @@ impl MultipathTransferEngine {
         send_control_frame_with_failover(&endpoints, &manifest_frame).await?;
 
         // 2. Enqueue all chunk jobs into bounded MPMC `flume` channel
-        let (job_tx, job_rx) = flume::bounded::<structChunkJob>((total_chunks as usize).max(16));
+        let (job_tx, job_rx) = flume::bounded::<ChunkJob>((total_chunks as usize).max(16));
         for entry in &manifest.files {
             for chunk in &entry.chunks {
-                let _ = job_tx.send(structChunkJob {
+                let _ = job_tx.send(ChunkJob {
                     file_id: entry.file_id.clone(),
                     chunk_index: chunk.index,
                     attempt: 0,
@@ -312,7 +312,7 @@ impl MultipathTransferEngine {
                                     .retain(|e| !(e.ip == ep_clone.ip && e.port == ep_clone.port));
 
                                 if job.attempt < MAX_CHUNK_RETRIES {
-                                    let _ = tx_requeue.send(structChunkJob {
+                                    let _ = tx_requeue.send(ChunkJob {
                                         file_id: job.file_id,
                                         chunk_index: job.chunk_index,
                                         attempt: job.attempt + 1,
@@ -565,7 +565,9 @@ impl MultipathReceiverServer {
                     }
                     PacketType::ResumeRequest => {
                         if let Ok(req) = bincode::deserialize::<ResumeRequestMessage>(&body) {
-                            if let Some(assembler) = assemblers_ref.read().get(&req.file_id) {
+                            let assembler_opt =
+                                assemblers_ref.read().get(&req.file_id).cloned();
+                            if let Some(assembler) = assembler_opt {
                                 let bmp = assembler.bitmap_snapshot();
                                 let resp = ResumeRequestMessage {
                                     session_id: header.session_id,
