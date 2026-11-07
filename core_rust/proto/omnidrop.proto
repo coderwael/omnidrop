@@ -1,0 +1,99 @@
+syntax = "proto3";
+
+package omnidrop.protocol.v1;
+
+// Connection & Discovery Profile exchanged during ECDH Handshake
+message EndpointProfile {
+  string ip_address = 1;
+  uint32 port = 2;
+  TransportTier tier = 3;
+  uint32 interface_metric = 4;
+  string interface_name = 5;
+}
+
+enum TransportTier {
+  TIER_UNSPECIFIED = 0;
+  TIER_1_WIFI_DIRECT = 1;
+  TIER_1_WIFI_AWARE = 2;
+  TIER_2_QUIC_MULTISTREAM = 3;
+  TIER_2_MULTI_TCP = 4;
+  TIER_3_LOCAL_LAN = 5;
+  TIER_4_WEBRTC = 6;
+}
+
+// Cryptographic Handshake Payload (X25519 ECDH + Ed25519 Identity)
+message HandshakePayload {
+  string device_id = 1;
+  string device_name = 2;
+  string platform = 3; // "android", "windows", "linux"
+  bytes x25519_ephemeral_pubkey = 4; // 32 bytes
+  bytes ed25519_identity_pubkey = 5; // 32 bytes
+  bytes signature = 6;               // 64-byte signature over ephemeral key + nonce
+  bytes nonce = 7;                   // 12-byte random challenge nonce
+  repeated EndpointProfile available_endpoints = 8;
+  string wifi_direct_mac = 9;
+  string wifi_aware_passphrase = 10;
+  uint64 max_chunk_size_bytes = 11;
+  uint32 max_parallel_streams = 12;
+}
+
+// Single Chunk Descriptor inside a File Entry
+message ChunkDescriptor {
+  uint32 chunk_index = 1;
+  uint64 offset_bytes = 2;
+  uint32 length_bytes = 3;
+  bytes sha256_hash = 4; // 32 bytes raw SHA-256 digest
+}
+
+// Single File or Directory Node in the Transfer Tree
+message FileEntry {
+  string file_id = 1;
+  string relative_path = 2;
+  uint64 size_bytes = 3;
+  uint64 modified_unix_ms = 4;
+  uint32 unix_mode = 5;
+  bool is_directory = 6;
+  bytes full_file_sha256 = 7;
+  uint32 chunk_size_bytes = 8;
+  repeated ChunkDescriptor chunks = 9;
+}
+
+// Complete Transfer Session Manifest
+message FileManifest {
+  string session_id = 1;
+  string sender_device_id = 2;
+  uint64 total_transfer_bytes = 3;
+  uint32 total_files = 4;
+  uint32 total_chunks = 5;
+  uint64 created_unix_ms = 6;
+  repeated FileEntry files = 7;
+}
+
+// Chunk Acknowledgment Packet Payload
+message ChunkAckPayload {
+  string session_id = 1;
+  string file_id = 2;
+  uint32 chunk_index = 3;
+  bool verified = 4;
+  uint32 error_code = 5; // 0 = OK, 1 = HASH_MISMATCH, 2 = IO_ERROR
+  uint64 receiver_Instant_bps = 6;
+}
+
+// Resume Request sent after link failover or interruption
+message ResumeRequestPayload {
+  string session_id = 1;
+  string file_id = 2;
+  // Compressed bitfield where bit N = 1 means chunk N is verified on disk
+  bytes received_chunk_bitmap = 3;
+  uint32 total_chunks = 4;
+  repeated EndpointProfile updated_endpoints = 5;
+}
+
+// Final Session Completion & Integrity Receipt
+message TransferCompletePayload {
+  string session_id = 1;
+  bool success = 2;
+  uint64 total_bytes_verified = 3;
+  uint64 elapsed_ms = 4;
+  string message = 5;
+}

@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omnidrop.io/schemas/v1/manifest.json",
+  "title": "OmniDropSessionManifest",
+  "description": "Production schema for multi-file, chunk-addressed P2P transfers in OmniDrop.",
+  "type": "object",
+  "required": [
+    "session_id",
+    "protocol_version",
+    "sender_device_id",
+    "total_transfer_bytes",
+    "default_chunk_size_bytes",
+    "files"
+  ],
+  "properties": {
+    "session_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique 128-bit UUIDv4 identifying this transfer session."
+    },
+    "protocol_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "sender_device_id": {
+      "type": "string",
+      "minLength": 8
+    },
+    "total_transfer_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "default_chunk_size_bytes": {
+      "type": "integer",
+      "minimum": 1048576,
+      "maximum": 16777216,
+      "description": "Dynamic chunk size between 4MB (4194304) and 16MB (16777216)."
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "file_id",
+          "relative_path",
+          "size_bytes",
+          "modified_unix_ms",
+          "is_directory",
+          "sha256_root",
+          "chunks"
+        ],
+        "properties": {
+          "file_id": { "type": "string" },
+          "relative_path": { "type": "string" },
+          "size_bytes": { "type": "integer", "minimum": 0 },
+          "modified_unix_ms": { "type": "integer", "minimum": 0 },
+          "unix_permissions": { "type": "integer", "default": 420 },
+          "is_directory": { "type": "boolean" },
+          "sha256_root": {
+            "type": "string",
+            "pattern": "^[a-fA-F0-9]{64}$"
+          },
+          "chunks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["index", "offset", "length", "sha256"],
+              "properties": {
+                "index": { "type": "integer", "minimum": 0 },
+                "offset": { "type": "integer", "minimum": 0 },
+                "length": { "type": "integer", "minimum": 1, "maximum": 16777216 },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[a-fA-F0-9]{64}$"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,58 @@
+name: OmniDrop Multi-Platform Release CI
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.0'
+          channel: 'stable'
+      - name: Compile Rust Core & Build Split APKs
+        run: |
+          cd core_rust
+          cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o ../mobile_app/android/app/src/main/jniLibs build --release
+          cd ../mobile_app
+          flutter pub get
+          flutter build apk --release --split-per-abi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omnidrop-android-apks
+          path: mobile_app/build/app/outputs/flutter-apk/*.apk
+
+  build-windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.0'
+          channel: 'stable'
+      - name: Compile Rust DLL & Build Windows Desktop Client
+        shell: bash
+        run: |
+          cd core_rust
+          cargo build --release --target x86_64-pc-windows-msvc
+          cd ../desktop_app
+          flutter pub get
+          flutter build windows --release
+          cp ../core_rust/target/x86_64-pc-windows-msvc/release/rust_omnidrop.dll build/windows/x64/runner/Release/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omnidrop-windows-x64-portable
+          path: desktop_app/build/windows/x64/runner/Release/
